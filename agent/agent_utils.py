@@ -571,3 +571,13 @@ def read_yaml_config(config_file: str) -> dict:
         raise FileNotFoundError(f"The config file '{config_file}' does not exist.")
     with open(config_file, "r") as f:
         return yaml.load(f, Loader=yaml.FullLoader)
+    
+    
+def parse_tasks(text: str) -> list[str]:
+    """Parse the tasks from the manager output."""
+    tasks = [] 
+    for line in text.strip().splitlines():
+        if not line.strip()[0].isdigit():
+            continue 
+        tasks.append(line.strip())
+    return tasks

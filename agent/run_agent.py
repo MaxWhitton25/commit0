@@ -12,6 +12,7 @@ from agent.agent_utils import (
     update_message_with_dependencies,
     get_lint_cmd,
     read_yaml_config,
+    parse_tasks,
 )
 import subprocess
 from agent.agents import AiderAgents
@@ -293,8 +294,8 @@ def run_team_for_repo(
             f"{repo_path} is not a git repo. Check if base_dir is correctly specified."
         )
 
-    manager = AiderAgents(1, agent_config.model_name)
-    coder = AiderAgents(agent_config.max_iteration, agent_config.model_name)
+    manager = AgentTeams(agent_config.max_iteration, agent_config.model_name)
+    coder = AgentTeams(agent_config.max_iteration, agent_config.model_name)
 
      # Check if there are changes in the current branch
     if local_repo.is_dirty():
@@ -345,7 +346,8 @@ def run_team_for_repo(
     with open(agent_config_log_file, "w") as agent_config_file:
         yaml.dump(agent_config, agent_config_file)
 
-    manager_message = "Write a concise plan of attack to implement the entire repo, but don't actually do any coding. The plan should not include any reccommendations to add files and should be a maximum of 500 words."
+    # /ask will make aider not write any code, but only a plan
+    manager_message = "/ask You are a manager in charge of writing a plan to complete the implementations for all functions (i.e., those with pass statements) and pass the unit tests. Write a concise plan of attack to implement the entire repo, but don't actually do any coding. Please output the plan in the format of a list of numbered steps. Each step should specify a file to edit and a high-level description of the change to make. For example, '1.) file.py: add a function to calculate the sum of two numbers'. Note that we only need to edit the files that contain functions with pass statements, ie. those in the current context. Give me only the plan, with no extraneous text."
     
     with DirContext(repo_path):
         if agent_config is None:
@@ -364,36 +366,46 @@ def run_team_for_repo(
                 dependencies = import_dependencies[f]
             file_name = "all"
             file_log_dir = experiment_log_dir / file_name
-            lint_cmd = get_lint_cmd(repo_name, agent_config.use_lint_info)
+            lint_cmd = get_lint_cmd(repo_name, agent_config.use_lint_info, commit0_config_file)
                 
+                
+            """
+            #uncommenting below works, but the manager.run_manager line doesnt work idk why
             
-            agent_return = manager.run(manager_message, "", lint_cmd, target_edit_files, file_log_dir)
-            with open(agent_return.log_file, 'r', encoding='utf-8') as file:
-                plan = file.read()
-            coder_message = "follow this implementation plan: "+plan
-
+            coder_message = f"Complete the following task, implementing the relevant incomplete functions (i.e., those with pass statements). You may add the specified file to the context if necessary:"
+                
             agent_return = coder.run(coder_message, "", lint_cmd, target_edit_files, file_log_dir)
+            """
             
-            # for f in target_edit_files:
-            #     update_queue.put(("set_current_file", (repo_name, f)))
-            #     dependencies = import_dependencies[f]
-            #     message = update_message_with_dependencies(coder_message, dependencies)
-            #     file_name = f.replace(".py", "").replace("/", "__")
-            #     file_log_dir = experiment_log_dir / file_name
-            #     lint_cmd = get_lint_cmd(repo_name, agent_config.use_lint_info)
-            #     agent_return = coder.run(message, "", lint_cmd, [f], file_log_dir)
+            agent_return = manager.run_manager(manager_message, target_edit_files, file_log_dir)
+            
+            #TODO: uncomment below after figuring out why manager.run_manager doesnt work
+            
+            # with open(agent_return.log_file, 'r', encoding='utf-8') as file:
+            #     plan = file.read()
+                
+            # update_queue.put(
+            #     (
+            #         "update_money_display",
+            #         (repo_name, file_name, agent_return.last_cost),
+            #     )
+            # )
+            
+            # tasks = parse_tasks(plan)
+            
+            # for task in tasks:
+            #     coder_message = f"Complete the following task, implementing the relevant incomplete functions (i.e., those with pass statements). You may add the specified file to the context if necessary: \n{task}"
+                
+            #     agent_return = coder.run(coder_message, "", lint_cmd, target_edit_files, file_log_dir)
+            #     #TODO: fix the display (right now it just displys one file)
+            
+
             #     update_queue.put(
             #         (
             #             "update_money_display",
             #             (repo_name, file_name, agent_return.last_cost),
             #         )
             #     )
-            update_queue.put(
-                    (
-                        "update_money_display",
-                        (repo_name, file_name, agent_return.last_cost),
-                    )
-                )
     
     
     
