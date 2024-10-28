@@ -8,10 +8,12 @@ from agent.agent_utils import (
     create_branch,
     get_message,
     get_target_edit_files,
+    get_changed_files_from_commits,
     update_message_with_dependencies,
     get_lint_cmd,
     read_yaml_config,
 )
+import subprocess
 from agent.agents import AiderAgents
 from agent.agents import AgentTeams
 from typing import Optional, Type, cast
@@ -49,14 +51,18 @@ def run_agent_for_repo(
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: RepoInstance,
-    update_queue: multiprocessing.Queue,
     branch: str,
+    update_queue: multiprocessing.Queue,
     override_previous_changes: bool = False,
     backend: str = "modal",
     log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
 ) -> None:
+    
+    commit0_config = read_commit0_dot_file(commit0_config_file)
     if agent_config.agent_name == "aider":
         run_aider_for_repo(
+                            commit0_config,
                             commit0_config["base_dir"],
                             agent_config,
                             cast(RepoInstance, example),
@@ -65,9 +71,11 @@ def run_agent_for_repo(
                             override_previous_changes,
                             backend,
                             log_dir,
+                            commit0_config_file,
                         )
     elif agent_config.agent_name == "aider_team":
         run_team_for_repo(
+                            commit0_config,
                             commit0_config["base_dir"],
                             agent_config,
                             cast(RepoInstance, example),
@@ -76,12 +84,15 @@ def run_agent_for_repo(
                             override_previous_changes,
                             backend,
                             log_dir,
+                            commit0_config_file,
                         )
     else:
         raise NotImplementedError(
             f"{agent_config.agent_name} is not implemented; please add your implementations in baselines/agents.py."
         )
+        
 def run_aider_for_repo(
+    commit0_config: Any,
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: RepoInstance,
@@ -90,16 +101,16 @@ def run_aider_for_repo(
     override_previous_changes: bool = False,
     backend: str = "modal",
     log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
 ) -> None:
     
-    agent = AiderAgents(agent_config.max_iteration, agent_config.model_name)
     """Run Aider for a given repository."""
-    # get repo info
+
+    assert "commit0" in commit0_config["dataset_name"]
     _, repo_name = example["repo"].split("/")
 
     # before starting, display all information to terminal
-    original_repo_name = repo_name
-    update_queue.put(("start_repo", (original_repo_name, 0)))
+    update_queue.put(("start_repo", (repo_name, 0)))
 
     # repo_name = repo_name.lower()
     # repo_name = repo_name.replace(".", "-")
@@ -114,7 +125,14 @@ def run_aider_for_repo(
             f"{repo_path} is not a git repo. Check if base_dir is correctly specified."
         )
 
-    
+    agent = AiderAgents(agent_config.max_iteration, agent_config.model_name)
+
+    # Check if there are changes in the current branch
+    if local_repo.is_dirty():
+        # Stage all changes
+        local_repo.git.add(A=True)
+        # Commit changes with the message "left from last change"
+        local_repo.index.commit("left from last change")
 
     # # if branch_name is not provided, create a new branch name based on agent_config
     # if branch is None:
@@ -127,12 +145,18 @@ def run_aider_for_repo(
     if latest_commit.hexsha != example["base_commit"] and override_previous_changes:
         local_repo.git.reset("--hard", example["base_commit"])
 
+    # get target files to edit and test files to run
     target_edit_files, import_dependencies = get_target_edit_files(
         local_repo,
         example["src_dir"],
         example["test"]["test_dir"],
-        str(latest_commit),
+        branch,
         example["reference_commit"],
+        agent_config.use_topo_sort_dependencies,
+    )
+
+    lint_files = get_changed_files_from_commits(
+        local_repo, "HEAD", example["base_commit"]
     )
     # Call the commit0 get-tests command to retrieve test files
     test_files_str = get_tests(repo_name, verbose=0)
@@ -152,27 +176,26 @@ def run_aider_for_repo(
     with open(agent_config_log_file, "w") as agent_config_file:
         yaml.dump(agent_config, agent_config_file)
 
-    # TODO: make this path more general
-    commit0_dot_file_path = str(Path(repo_path).parent.parent / ".commit0.yaml")
-
     with DirContext(repo_path):
         if agent_config is None:
             raise ValueError("Invalid input")
 
         if agent_config.run_tests:
-            update_queue.put(("start_repo", (original_repo_name, len(test_files))))
+            update_queue.put(("start_repo", (repo_name, len(test_files))))
             # when unit test feedback is available, iterate over test files
             for test_file in test_files:
                 update_queue.put(("set_current_file", (repo_name, test_file)))
-                test_cmd = f"python -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-dot-file-path {commit0_dot_file_path}"
+                test_cmd = f"python -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
                 test_file_name = test_file.replace(".py", "").replace("/", "__")
                 test_log_dir = experiment_log_dir / test_file_name
-                lint_cmd = get_lint_cmd(repo_name, agent_config.use_lint_info)
-                message = get_message(agent_config, repo_path, test_file=test_file)
+                lint_cmd = get_lint_cmd(
+                    repo_name, agent_config.use_lint_info, commit0_config_file
+                )
+                message = get_message(agent_config, repo_path, test_files=[test_file])
 
                 # display the test file to terminal
                 agent_return = agent.run(
-                    message,
+                    "",
                     test_cmd,
                     lint_cmd,
                     target_edit_files,
@@ -186,23 +209,48 @@ def run_aider_for_repo(
                         (repo_name, test_file, agent_return.last_cost),
                     )
                 )
+        elif agent_config.run_entire_dir_lint:
+            update_queue.put(("start_repo", (repo_name, len(lint_files))))
+            # when unit test feedback is available, iterate over test files
+            for lint_file in lint_files:
+                update_queue.put(("set_current_file", (repo_name, lint_file)))
+                lint_file_name = lint_file.replace(".py", "").replace("/", "__")
+                lint_log_dir = experiment_log_dir / lint_file_name
+                lint_cmd = get_lint_cmd(
+                    repo_name, agent_config.use_lint_info, commit0_config_file
+                )
+
+                # display the test file to terminal
+                agent_return = agent.run(
+                    "",
+                    "",
+                    lint_cmd,
+                    [lint_file],
+                    lint_log_dir,
+                    lint_first=True,
+                )
+                # after running the agent, update the money display
+                update_queue.put(
+                    (
+                        "update_money_display",
+                        (repo_name, lint_file, agent_return.last_cost),
+                    )
+                )
         else:
             # when unit test feedback is not available, iterate over target files to edit
-            message = get_message(
-                agent_config, repo_path, test_dir=example["test"]["test_dir"]
-            )
+            message = get_message(agent_config, repo_path, test_files=test_files)
 
-            update_queue.put(
-                ("start_repo", (original_repo_name, len(target_edit_files)))
-            )
-            
+            update_queue.put(("start_repo", (repo_name, len(target_edit_files))))
             for f in target_edit_files:
                 update_queue.put(("set_current_file", (repo_name, f)))
-                dependencies = import_dependencies[f]
-                message = update_message_with_dependencies(message, dependencies)
+                if agent_config.add_import_module_to_context:
+                    dependencies = import_dependencies.get(f, [])
+                    message = update_message_with_dependencies(message, dependencies)
                 file_name = f.replace(".py", "").replace("/", "__")
                 file_log_dir = experiment_log_dir / file_name
-                lint_cmd = get_lint_cmd(repo_name, agent_config.use_lint_info)
+                lint_cmd = get_lint_cmd(
+                    repo_name, agent_config.use_lint_info, commit0_config_file
+                )
                 agent_return = agent.run(message, "", lint_cmd, [f], file_log_dir)
                 update_queue.put(
                     (
@@ -210,8 +258,10 @@ def run_aider_for_repo(
                         (repo_name, file_name, agent_return.last_cost),
                     )
                 )
-    update_queue.put(("finish_repo", original_repo_name))
+    update_queue.put(("finish_repo", repo_name))
+
 def run_team_for_repo(
+    commit0_config: Any,
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: RepoInstance,
@@ -220,14 +270,15 @@ def run_team_for_repo(
     override_previous_changes: bool = False,
     backend: str = "modal",
     log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
 ) -> None:
-    """Run Aider for a given repository."""
+    """Run Aider Team for a given repository."""
     # get repo info
+    assert "commit0" in commit0_config["dataset_name"]
     _, repo_name = example["repo"].split("/")
 
     # before starting, display all information to terminal
-    original_repo_name = repo_name
-    update_queue.put(("start_repo", (original_repo_name, 0)))
+    update_queue.put(("start_repo", (repo_name, 0)))
 
     # repo_name = repo_name.lower()
     # repo_name = repo_name.replace(".", "-")
@@ -244,7 +295,13 @@ def run_team_for_repo(
 
     manager = AiderAgents(1, agent_config.model_name)
     coder = AiderAgents(agent_config.max_iteration, agent_config.model_name)
-    
+
+     # Check if there are changes in the current branch
+    if local_repo.is_dirty():
+        # Stage all changes
+        local_repo.git.add(A=True)
+        # Commit changes with the message "left from last change"
+        local_repo.index.commit("left from last change")
 
     # # if branch_name is not provided, create a new branch name based on agent_config
     # if branch is None:
@@ -257,15 +314,19 @@ def run_team_for_repo(
     if latest_commit.hexsha != example["base_commit"] and override_previous_changes:
         local_repo.git.reset("--hard", example["base_commit"])
 
+    # get target files to edit and test files to run
     target_edit_files, import_dependencies = get_target_edit_files(
         local_repo,
         example["src_dir"],
         example["test"]["test_dir"],
-        str(latest_commit),
+        branch,
         example["reference_commit"],
+        agent_config.use_topo_sort_dependencies,
     )
 
-
+    lint_files = get_changed_files_from_commits(
+        local_repo, "HEAD", example["base_commit"]
+    )
     # Call the commit0 get-tests command to retrieve test files
     test_files_str = get_tests(repo_name, verbose=0)
     test_files = sorted(list(set([i.split(":")[0] for i in test_files_str])))
@@ -284,8 +345,6 @@ def run_team_for_repo(
     with open(agent_config_log_file, "w") as agent_config_file:
         yaml.dump(agent_config, agent_config_file)
 
-    # TODO: make this path more general
-    commit0_dot_file_path = str(Path(repo_path).parent.parent / ".commit0.yaml")
     manager_message = "Write a concise plan of attack to implement the entire repo, but don't actually do any coding. The plan should not include any reccommendations to add files and should be a maximum of 500 words."
     
     with DirContext(repo_path):
@@ -295,8 +354,10 @@ def run_team_for_repo(
             # when unit test feedback is not available, iterate over target files to edit
 
             update_queue.put(
-                ("start_repo", (original_repo_name, len(target_edit_files)))
+                ("start_repo", (repo_name, len(target_edit_files)))
             )
+            
+            #TODO: add support for unit test / lint feedback
             
             for f in target_edit_files:
                 update_queue.put(("set_current_file", (repo_name, f)))
@@ -336,7 +397,8 @@ def run_team_for_repo(
     
     
     
-    update_queue.put(("finish_repo", original_repo_name))
+    update_queue.put(("finish_repo", repo_name))
+
 
 
 def run_agent(
@@ -354,6 +416,7 @@ def run_agent(
 
     agent_config = AgentConfig(**config)
 
+    commit0_config_file = os.path.abspath(commit0_config_file)
     commit0_config = read_commit0_dot_file(commit0_config_file)
 
     dataset = load_dataset(
@@ -376,6 +439,16 @@ def run_agent(
     # if len(filtered_dataset) > 1:
     #     sys.stdout = open(os.devnull, "w")
 
+    if agent_config.add_import_module_to_context:
+        # Install Chrome for Playwright for browser-based agents
+        try:
+            subprocess.run(["playwright", "install", "chromium"], check=True)
+            print("Chrome installed successfully for Playwright")
+        except subprocess.CalledProcessError as e:
+            print(f"Error installing Chrome for Playwright: {e}")
+        except FileNotFoundError:
+            print("Playwright not found. Make sure it's installed and in your PATH.")
+
     with TerminalDisplay(len(filtered_dataset)) as display:
         not_started_repos = [
             cast(RepoInstance, example)["repo"].split("/")[-1]
@@ -394,6 +467,7 @@ def run_agent(
             agent_config.agent_name,
             agent_config.model_name,
             agent_config.run_tests,
+            agent_config.use_topo_sort_dependencies,
             agent_config.use_repo_info,
             agent_config.use_unit_tests_info,
             agent_config.use_spec_info,
@@ -414,12 +488,12 @@ def run_agent(
                             commit0_config["base_dir"],
                             agent_config,
                             cast(RepoInstance, example),
-                            update_queue,
                             branch,
+                            update_queue,
                             override_previous_changes,
                             backend,
                             log_dir,
-                            
+                            commit0_config_file,
                         ),
                     )
                     results.append(result)
