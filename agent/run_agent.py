@@ -15,8 +15,7 @@ from agent.agent_utils import (
     parse_tasks,
 )
 import subprocess
-from agent.agents import AiderAgents
-from agent.agents import AgentTeams
+from agent.agents import AiderAgents, AgentTeams
 from typing import Optional, Type, cast
 from types import TracebackType
 from agent.class_types import AgentConfig
@@ -29,7 +28,6 @@ from datetime import datetime
 from agent.display import TerminalDisplay
 import queue
 import time
-
 
 class DirContext:
     def __init__(self, d: str):
@@ -273,6 +271,7 @@ def run_team_for_repo(
     log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
     commit0_config_file: str = "",
 ) -> None:
+        
     """Run Aider Team for a given repository."""
     # get repo info
     assert "commit0" in commit0_config["dataset_name"]
@@ -294,7 +293,7 @@ def run_team_for_repo(
             f"{repo_path} is not a git repo. Check if base_dir is correctly specified."
         )
 
-    manager = AgentTeams(agent_config.max_iteration, agent_config.model_name)
+    manager = AgentTeams(1, agent_config.model_name)
     coder = AgentTeams(agent_config.max_iteration, agent_config.model_name)
 
      # Check if there are changes in the current branch
@@ -347,7 +346,19 @@ def run_team_for_repo(
         yaml.dump(agent_config, agent_config_file)
 
     # /ask will make aider not write any code, but only a plan
-    manager_message = "/ask You are a manager in charge of writing a plan to complete the implementations for all functions (i.e., those with pass statements) and pass the unit tests. Write a concise plan of attack to implement the entire repo, but don't actually do any coding. Please output the plan in the format of a list of numbered steps. Each step should specify a file to edit and a high-level description of the change to make. For example, '1.) file.py: add a function to calculate the sum of two numbers'. Note that we only need to edit the files that contain functions with pass statements, ie. those in the current context. Give me only the plan, with no extraneous text."
+    manager_message = f"""You are a manager in charge of writing a plan to complete the implementations for all functions (i.e., those with pass statements) and pass the unit tests. Write a concise plan of attack to implement the entire repo, but don't actually do any coding. Please output the plan in the format of a list of numbered steps. Each step should specify a file to edit and a high-level description of the change to make. Note that we only need to edit the files that contain functions with pass statements, ie. those in the current context. Give me only the plan, with no extraneous text.
+    
+    You MUST precede the plan with the keyword PLAN_START, and end it with the keyword PLAN_END. You MUST follow the formatting of the example plan below, with a number preceding each step on a new line, and one file name followed by a colon and a description of the change to make:
+    
+    PLAN_START
+    1.) example_file.py: description of function(s) to implement in example_file.py
+    2.) example_file2.py: description of function(s) to implement in example_file2.py
+    ... 
+    PLAN_END
+    
+    Remember that you must modify all of the target edit files: {target_edit_files}
+    The plan does not neccessarily need to edit the whole file in one step, and it may be more granular as you see fit.
+    """
     
     with DirContext(repo_path):
         if agent_config is None:
@@ -361,51 +372,46 @@ def run_team_for_repo(
             
             #TODO: add support for unit test / lint feedback
             
-            for f in target_edit_files:
-                update_queue.put(("set_current_file", (repo_name, f)))
-                dependencies = import_dependencies[f]
             file_name = "all"
             file_log_dir = experiment_log_dir / file_name
             lint_cmd = get_lint_cmd(repo_name, agent_config.use_lint_info, commit0_config_file)
                 
                 
-            """
-            #uncommenting below works, but the manager.run_manager line doesnt work idk why
+            # #uncommenting below works, but the manager.run_manager line doesnt work idk why
             
-            coder_message = f"Complete the following task, implementing the relevant incomplete functions (i.e., those with pass statements). You may add the specified file to the context if necessary:"
+            # coder_message = f"Complete the following task, implementing the relevant incomplete functions (i.e., those with pass statements). You may add the specified file to the context if necessary:"
                 
-            agent_return = coder.run(coder_message, "", lint_cmd, target_edit_files, file_log_dir)
-            """
+            # agent_return = coder.run(coder_message, "", lint_cmd, target_edit_files, file_log_dir)
             
             agent_return = manager.run_manager(manager_message, target_edit_files, file_log_dir)
             
-            #TODO: uncomment below after figuring out why manager.run_manager doesnt work
-            
-            # with open(agent_return.log_file, 'r', encoding='utf-8') as file:
-            #     plan = file.read()
-                
             # update_queue.put(
             #     (
             #         "update_money_display",
             #         (repo_name, file_name, agent_return.last_cost),
             #     )
             # )
+                        
+            with open(agent_return.log_file, 'r', encoding='utf-8') as file:
+                plan = file.read()
             
-            # tasks = parse_tasks(plan)
+            tasks = parse_tasks(plan)
             
-            # for task in tasks:
-            #     coder_message = f"Complete the following task, implementing the relevant incomplete functions (i.e., those with pass statements). You may add the specified file to the context if necessary: \n{task}"
+            for file_name, description in tasks:
+                update_queue.put(("set_current_file", (repo_name, file_name)))
                 
-            #     agent_return = coder.run(coder_message, "", lint_cmd, target_edit_files, file_log_dir)
-            #     #TODO: fix the display (right now it just displys one file)
-            
+                coder_message = f"Complete the following task, implementing the relevant incomplete functions (i.e., those with pass statements): \n{description}"
+                
+                agent_return = coder.run(coder_message, "", lint_cmd, [file_name], file_log_dir)
+                
+                #TODO: fix the display (right now it just displys one file)
 
-            #     update_queue.put(
-            #         (
-            #             "update_money_display",
-            #             (repo_name, file_name, agent_return.last_cost),
-            #         )
-            #     )
+                update_queue.put(
+                    (
+                        "update_money_display",
+                        (repo_name, file_name, agent_return.last_cost),
+                    )
+                )
     
     
     
@@ -486,6 +492,7 @@ def run_agent(
             agent_config.use_lint_info,
         )
         display.update_branch_display(branch)
+        
         with multiprocessing.Manager() as manager:
             update_queue = manager.Queue()
             with multiprocessing.Pool(processes=max_parallel_repos) as pool:

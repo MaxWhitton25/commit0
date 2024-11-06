@@ -57,6 +57,24 @@ class AiderReturn(AgentReturn):
                         last_cost = float(match.group(1))
         return last_cost
 
+class TeamsReturn(AgentReturn):
+    def __init__(self, log_file: Path):
+        super().__init__(log_file)
+        self.last_cost = self.get_money_cost()
+
+    def get_money_cost(self) -> float:
+        """Get accumulated money cost from log file"""
+        last_cost = 0.0
+        with open(self.log_file, "r") as file:
+            for line in file:
+                if "Tokens:" in line and "Cost:" in line:
+                    match = re.search(
+                        r"Cost: \$\d+\.\d+ message, \$(\d+\.\d+) session", line
+                    )
+                    if match:
+                        last_cost = float(match.group(1))
+        return last_cost
+
 class AgentTeams(Agents):
     def __init__(self, max_iteration: int, model_name: str):
         super().__init__(max_iteration)
@@ -97,13 +115,14 @@ class AgentTeams(Agents):
             chat_history_file=chat_history_file,
         )
         manager = Coder.create(
+            edit_format="ask",
             main_model=self.model,
             read_only_fnames=fnames,
             io=io,
         )
         manager.max_reflection = self.max_iteration
         manager.stream = True
-
+        
         manager.run(message)
 
         sys.stdout.close()
@@ -112,7 +131,7 @@ class AgentTeams(Agents):
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
 
-        return AgentReturn(log_file)
+        return TeamsReturn(log_file)
         
     def run(
         self,
@@ -163,7 +182,7 @@ class AgentTeams(Agents):
             main_model=self.model,
             
             #make the coder import files on its own for now
-            fnames=[],
+            fnames=fnames,
             auto_lint=auto_lint,
             auto_test=auto_test,
             lint_cmds={"python": lint_cmd},
@@ -180,7 +199,7 @@ class AgentTeams(Agents):
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
 
-        return AgentReturn(log_file)
+        return TeamsReturn(log_file)
 
 class AiderAgents(Agents):
     def __init__(self, max_iteration: int, model_name: str):
