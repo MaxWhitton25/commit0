@@ -8,6 +8,7 @@ from aider.models import Model
 from aider.io import InputOutput
 import re
 import os
+import bz2
 
 
 def handle_logging(logging_name: str, log_file: Path) -> None:
@@ -108,6 +109,11 @@ class AgentTeams(Agents):
         # Configure httpx and backoff logging
         handle_logging("httpx", log_file)
         handle_logging("backoff", log_file)
+        
+        # Get the specifications
+        with bz2.open("spec.pdf.bz2", "rb") as in_file:
+            with open("spec.pdf", "wb") as out_file:
+                out_file.write(in_file.read())
 
         io = InputOutput(
             yes=False,
@@ -117,7 +123,7 @@ class AgentTeams(Agents):
         manager = Coder.create(
             edit_format="ask",
             main_model=self.model,
-            read_only_fnames=fnames,
+            read_only_fnames=fnames + ["spec.pdf"],
             io=io,
         )
         manager.max_reflection = self.max_iteration

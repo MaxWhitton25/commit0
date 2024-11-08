@@ -346,18 +346,18 @@ def run_team_for_repo(
         yaml.dump(agent_config, agent_config_file)
 
     # /ask will make aider not write any code, but only a plan
-    manager_message = f"""You are a manager in charge of writing a plan to complete the implementations for all functions (i.e., those with pass statements) and pass the unit tests. Write a concise plan of attack to implement the entire repo, but don't actually do any coding. Please output the plan in the format of a list of numbered steps. Each step should specify a file to edit and a high-level description of the change to make. Note that we only need to edit the files that contain functions with pass statements, ie. those in the current context. Give me only the plan, with no extraneous text.
+    manager_message = f"""You are a manager in charge of writing a plan to complete the implementations for all functions (i.e., those with pass statements) and pass the unit tests. Write a plan of attack to implement the entire repo, keeping in mind the most effective order in which tasks should be implemented. Please output the plan in the format of a list of numbered steps. Each step should specify a file to edit and a high-level description of the change to make. Note that we only need to edit the files that contain functions with pass statements, ie. those in the current context. Give me ONLY the plan, with no extraneous text.
     
-    You MUST precede the plan with the keyword PLAN_START, and end it with the keyword PLAN_END. You MUST follow the formatting of the example plan below, with a number preceding each step on a new line, and one file name followed by a colon and a description of the change to make:
+    You MUST precede the plan with the keyword PLAN_START, and end it with the keyword PLAN_END. You MUST follow the formatting of the example plan below, with a number preceding each step on a new line, and one file name followed by a colon and a detailed description of the change to make:
     
     PLAN_START
-    1.) example_file.py: description of function(s) to implement in example_file.py
-    2.) example_file2.py: description of function(s) to implement in example_file2.py
+    1.) example_file.py: description of function(s) to implement in example_file.py, including any relevant context or dependencies
+    2.) example_file2.py: description of function(s) to implement in example_file2.py, including any relevant context or dependencies
     ... 
     PLAN_END
     
     Remember that you must modify all of the target edit files: {target_edit_files}
-    The plan does not neccessarily need to edit the whole file in one step, and it may be more granular as you see fit.
+    The plan does not neccessarily need to edit the whole file in one step, and it may be more granular as you see fit. Additionally, you should look at the file 'spec.pdf' for more information on the project requirements and specifications.
     """
     
     with DirContext(repo_path):
@@ -400,7 +400,7 @@ def run_team_for_repo(
             for file_name, description in tasks:
                 update_queue.put(("set_current_file", (repo_name, file_name)))
                 
-                coder_message = f"Complete the following task, implementing the relevant incomplete functions (i.e., those with pass statements): \n{description}"
+                coder_message = f"Complete the following task, implementing the relevant incomplete function(s) (i.e., those with pass statements): \n{description}"
                 
                 agent_return = coder.run(coder_message, "", lint_cmd, [file_name], file_log_dir)
                 
